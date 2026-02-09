@@ -1,3 +1,0 @@
-"""
-Expression parser utilities.
-"""

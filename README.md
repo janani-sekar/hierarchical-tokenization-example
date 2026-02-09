@@ -1,140 +1,106 @@
-# Hierarchical Tokenization for Mathematical Expressions
+# Hierarchical Tokenization for Arithmetic
 
-This repository implements hierarchical tokenization techniques for processing mathematical equations, inspired by recent research in structured tokenization approaches (based on https://arxiv.org/pdf/2511.14868).
+Does giving a transformer structural hints about multi-digit numbers help it learn arithmetic?
 
-## Overview
+We compare two approaches: a standard character-level transformer versus one that uses hierarchical token prepending (HTP) to compose digit groups into number-level representations. Inspired by [Ding et al., 2025](https://arxiv.org/pdf/2511.14868).
 
-Traditional tokenization methods treat mathematical expressions as flat sequences of characters or symbols, losing important structural and hierarchical information. This project explores **hierarchical tokenization** - a method that preserves the inherent tree-like structure of mathematical expressions during the tokenization process.
+## The idea
 
-### What is Hierarchical Tokenization?
+Consider the expression `25 + 13 = 38`.
 
-Hierarchical tokenization decomposes mathematical expressions into multi-level token representations that respect:
-- **Operator precedence** (e.g., multiplication before addition)
-- **Nested structures** (e.g., parentheses, fractions, exponents)
-- **Semantic groupings** (e.g., function applications, subscripts)
-
-For example, the expression `2 * (3 + 4)` would be tokenized hierarchically as:
-```
-[MULT]
-  ├── [NUM: 2]
-  └── [ADD]
-      ├── [NUM: 3]
-      └── [NUM: 4]
-```
-
-## Motivation
-
-Mathematical expressions have inherent hierarchical structure that is critical for:
-- **Understanding mathematical relationships**: Preserving operator precedence and grouping
-- **Symbolic computation**: Enabling symbolic manipulation and simplification
-- **Machine learning on math**: Better representations for models processing mathematical content
-- **Formula parsing**: Accurate interpretation of complex expressions
-
-## Project Structure
+**Flat tokenization** treats every character as its own token:
 
 ```
-hierarchical-tokenization-example/
-├── src/                    # Source code
-│   ├── tokenizer/         # Hierarchical tokenization implementation
-│   ├── parser/            # Expression parsing utilities
-│   ├── models/            # Data structures for hierarchical tokens
-│   └── utils/             # Helper functions
-├── data/                   # Example datasets and test cases
-│   ├── raw/               # Raw mathematical expressions
-│   ├── processed/         # Tokenized outputs
-│   └── examples/          # Example use cases
-├── tests/                  # Unit tests (to be added)
-├── notebooks/              # Jupyter notebooks for demos (to be added)
-├── .gitignore             # Git ignore patterns
-└── README.md              # This file
+[BOS, 2, 5, +, 1, 3, =, 3, 8, EOS]
 ```
 
-## Features
+The transformer has to figure out from raw characters that `2, 5` together mean "twenty-five."
 
-- **Multi-level tokenization**: Breaks down expressions into hierarchical token trees
-- **Operator precedence handling**: Respects mathematical operator precedence rules
-- **Nested structure support**: Handles parentheses, brackets, and other grouping symbols
-- **Extensible design**: Easy to add support for new mathematical operators and functions
-- **Math-specific tokenization**: Designed specifically for mathematical notation
+**Hierarchical tokenization** inserts a `<num>` summary token before each digit group:
 
-## Getting Started
+```
+[BOS, <num>, 2, 5, +, <num>, 1, 3, =, 3, 8, EOS]
+```
 
-### Prerequisites
+Between transformer layers, a rewiring step copies the hidden state of the last digit in each number (which has attended to all preceding digits via causal attention) back into the `<num>` position. Later layers can then attend to `<num>` to get a number-level summary. The transformer's own attention does the composition -- no separate learned module is needed.
 
-- Python 3.8 or higher
-- pip or conda for package management
+## How rewiring works
 
-### Installation
+After layer 0 processes the sequence with causal attention, the hidden state at position `5` (the digit "5" in "25") has attended to `<num>`, `2`, and `5`. It now encodes information about the full number "25".
+
+The rewiring step copies that hidden state to the `<num>` position. In layer 1, any later token (like `+` or `=`) that attends to position `<num>` now sees a number-level summary of "25", even though `<num>` comes *before* the digits in the sequence. This creates backward information flow within the causal attention framework.
+
+```
+Layer 0:  [BOS, <num>, 2, 5, +, <num>, 1, 3, =, ...]
+                 |           |
+                 |     (5 attends to <num>, 2, 5)
+                 |           |
+Rewire:          <--- copy ---
+                 |
+Layer 1:  [BOS, <num>=summary(25), 2, 5, +, ...]
+                      ^
+                      |
+              (+ can now attend to number-level summary of 25)
+```
+
+This rewiring happens between every pair of consecutive layers (skipping before layer 0).
+
+## Architecture
+
+Both models use the **exact same** `ArithmeticTransformer` class -- a decoder-only transformer with causal attention. The only difference at runtime is whether the rewiring step is active:
+
+- **Flat model**: `model(tokens)` -- standard causal transformer, no rewiring
+- **Hierarchical model**: `model(tokens, rewire_src=..., rewire_dst=...)` -- same transformer, but with between-layer rewiring
+
+Both models have identical parameter counts. The comparison isolates the effect of the structural `<num>` tokens and rewiring.
+
+**Model details**: 4 transformer layers, d_model=64, 4 attention heads, FFN dim=256, ~202K parameters.
+
+**Task**: Given an expression like `418+273=`, predict the answer `691` character by character.
+
+**Training**: Next-token prediction with cross-entropy loss, computed only on the answer tokens (after `=`). Adam optimizer, learning rate 3e-4.
+
+**Data**: 50K random addition problems with operands from 1 to 999. The space of possible problems (~998K) is much larger than the training set, so the model must generalize.
+
+## Results
+
+With 1-999 addition (50K train, 5K test, 50 epochs):
+
+| Epoch | Flat acc | Hier acc |
+|-------|----------|----------|
+| 5     | 1.2%     | **4.3%** |
+| 10    | 76.5%    | **83.6%** |
+| 20    | 95.0%    | **97.2%** |
+| 30    | 97.9%    | **98.7%** |
+| 50    | 98.8%    | **99.6%** |
+
+The hierarchical model learns slightly faster.
+
+## Setup
 
 ```bash
-# Clone the repository
-git clone https://github.com/janani-sekar/hierarchical-tokenization-example.git
-cd hierarchical-tokenization-example
-
-# Install dependencies (to be specified)
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Basic Usage
+## Training
 
-```python
-# Example usage (implementation to be added)
-from src.tokenizer import HierarchicalTokenizer
-
-# Initialize tokenizer
-tokenizer = HierarchicalTokenizer()
-
-# Tokenize a mathematical expression
-expression = "2 * (3 + 4) / 5"
-tokens = tokenizer.tokenize(expression)
-
-# Access hierarchical structure
-print(tokens.tree_representation())
+```bash
+cd src
+python train.py
 ```
 
-## Implementation Roadmap
+## Project structure
 
-- [ ] Core tokenizer implementation
-- [ ] Expression parser
-- [ ] Hierarchical token data structures
-- [ ] Support for basic arithmetic operators (+, -, *, /)
-- [ ] Support for parentheses and grouping
-- [ ] Support for advanced operators (exponents, roots, etc.)
-- [ ] Support for mathematical functions (sin, cos, log, etc.)
-- [ ] Visualization tools for token hierarchies
-- [ ] Example datasets
-- [ ] Unit tests
-- [ ] Documentation and tutorials
+```
+src/
+  data.py        # Generate arithmetic expression datasets
+  tokenizer.py   # Character-level vocab + hierarchical sequence construction
+  model.py       # Decoder-only transformer with optional HTP rewiring
+  train.py       # Training loop comparing flat vs hierarchical
+```
 
-## Use Cases
+## Reference
 
-1. **Mathematical Expression Parsing**: Convert LaTeX or plain text math into structured representations
-2. **Symbolic Computation**: Enable computer algebra systems to manipulate expressions
-3. **Math Education Tools**: Help students understand expression structure and evaluation order
-4. **Machine Learning**: Create better representations for models that process mathematical content
-5. **Formula Search**: Enable semantic search over mathematical expressions
-
-## Research Background
-
-This implementation is based on hierarchical tokenization approaches from recent research, particularly focusing on applications to mathematical expressions. The key insight is that preserving hierarchical structure during tokenization leads to better downstream performance in tasks involving mathematical reasoning and computation.
-
-**Reference**: https://arxiv.org/pdf/2511.14868
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. Areas where contributions would be particularly valuable:
-
-- Additional operator support
-- Performance optimizations
-- More comprehensive test cases
-- Documentation improvements
-- Example notebooks
-
-## License
-
-(To be specified)
-
-## Acknowledgments
-
-- Based on hierarchical tokenization research
-- Inspired by advances in structured representation learning
+[Hierarchical Token Prepending: Enhancing Information Flow in Decoder-based LLM Embeddings](https://arxiv.org/pdf/2511.14868) (Ding et al., 2025)
