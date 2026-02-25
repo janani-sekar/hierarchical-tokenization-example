@@ -1,0 +1,12 @@
+[project]
+name = "hierarchical-tokenization-example"
+version = "0.1.0"
+description = "Hierarchical tokenization for arithmetic: L2R vs R2L, flat vs HTP vs HTP+HAttn."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "numpy",
+    "matplotlib",
+    "tqdm",
+]
